@@ -19,7 +19,7 @@ Postgres runs in Docker; the API runs on the host for faster iteration.
 | Language          | JavaScript (ESM, no TypeScript)                                       |
 | Frontend          | Vite, React 18, shadcn/ui, Tailwind, TanStack Query, React Hook Form, Zod |
 | Backend           | Express 4, Prisma 5, Postgres 16                                      |
-| Auth (planned)    | JWT in `localStorage` + server-side session row in Postgres           |
+| Auth              | JWT in `localStorage` + server-side `Session` row in Postgres; bcrypt password hashing |
 | Tests             | Vitest everywhere; supertest for API HTTP tests                       |
 | Architecture      | Feature-Sliced Design (FSD) on the frontend; layered FSD on the API   |
 
@@ -62,7 +62,10 @@ pnpm db:up
 # 4. Generate the Prisma client + apply the initial migration
 pnpm --filter @fishing-journal/api prisma:migrate -- --name init
 
-# 5. Boot both apps
+# 5. Seed the admin user (reads ADMIN_EMAIL / ADMIN_PASSWORD from apps/api/.env)
+pnpm --filter @fishing-journal/api db:seed
+
+# 6. Boot both apps
 pnpm dev
 ```
 
@@ -70,8 +73,11 @@ You should now have:
 
 - API at <http://localhost:3001> (health: <http://localhost:3001/api/health>)
 - Frontend at <http://localhost:5173>
+- A sign-in page at <http://localhost:5173/login> — use the admin credentials you set in `apps/api/.env`. After login you'll land on `/dashboard`.
 
 The Vite dev server proxies `/api/*` to the API, so the frontend can call the backend without CORS hassle.
+
+> **Change the admin password before logging in for the first time.** The default in `.env.example` is `changeme-locally` — fine for a throwaway local DB, not fine for anything else. Edit `ADMIN_PASSWORD` in `apps/api/.env` and re-run `pnpm --filter @fishing-journal/api db:seed` (the seed is idempotent — it upserts).
 
 ---
 
@@ -95,8 +101,11 @@ Two `.env` files. **Never commit them.**
 | `NODE_ENV`      | `development`                                                                      |                                                  |
 | `PORT`          | `3001`                                                                             |                                                  |
 | `DATABASE_URL`  | `postgresql://fishing:fishing@localhost:5432/fishing_journal?schema=public`        | Must match the root `.env` Postgres credentials. |
-| `JWT_SECRET`    | _placeholder_                                                                      | Replace with a long random string.               |
+| `JWT_SECRET`    | _placeholder_                                                                      | Replace with a long random string. Used to sign session tokens. |
+| `JWT_EXPIRES_IN`| `7d`                                                                               | Token lifetime ([`jsonwebtoken` syntax](https://github.com/auth0/node-jsonwebtoken#token-expiration-exp-claim)). Session row's `expiresAt` is set to match. |
 | `CORS_ORIGIN`   | `http://localhost:5173`                                                            | Frontend dev origin.                             |
+| `ADMIN_EMAIL`   | `admin@example.com`                                                                | Used by `db:seed` to upsert the admin account.   |
+| `ADMIN_PASSWORD`| `changeme-locally`                                                                 | Used by `db:seed`. Change before seeding.        |
 
 The frontend reads no env variables today; future `VITE_*` variables will live in `apps/frontend/.env`.
 
@@ -127,6 +136,7 @@ All commands below run from the **repo root**.
 | `pnpm prisma:generate`   | Generate the Prisma client (run after schema changes).    |
 | `pnpm prisma:migrate`    | Create + apply a dev migration. Pass `-- --name <name>`.  |
 | `pnpm prisma:studio`     | Open Prisma Studio at <http://localhost:5555>.            |
+| `pnpm db:seed`           | Upsert the admin user from `ADMIN_EMAIL` / `ADMIN_PASSWORD`. |
 
 ### Frontend-specific scripts (`apps/frontend`)
 
@@ -146,39 +156,45 @@ fishing-journal/
 ├── apps/
 │   ├── api/                          # Express + Prisma backend
 │   │   ├── prisma/
-│   │   │   └── schema.prisma         # Database schema (single source of truth)
+│   │   │   ├── schema.prisma         # Database schema (single source of truth)
+│   │   │   ├── seed.js               # Admin seed (reads ADMIN_EMAIL / ADMIN_PASSWORD)
+│   │   │   └── migrations/           # Generated SQL migrations (committed)
 │   │   ├── src/
 │   │   │   ├── index.js              # Server bootstrap (port, signals, prisma disconnect)
 │   │   │   ├── app.js                # Express app factory (middleware, routing)
 │   │   │   ├── config/env.js         # Typed-ish env reader
 │   │   │   ├── db/prisma.js          # Singleton PrismaClient
-│   │   │   ├── middleware/           # Cross-cutting middleware
+│   │   │   ├── lib/                  # jwt.js (sign/verify), password.js (bcrypt)
+│   │   │   ├── middleware/           # errorHandler, notFoundHandler, auth (requireAuth/requireRole)
 │   │   │   ├── routes/index.js       # Root /api router — mounts feature routers
 │   │   │   └── features/
-│   │   │       └── health/           # Example feature: routes → controller → service
-│   │   │           ├── health.routes.js
-│   │   │           ├── health.controller.js
-│   │   │           ├── health.service.js
-│   │   │           └── health.test.js
+│   │   │       ├── health/           # health.routes/controller/service + test
+│   │   │       └── auth/             # login / logout / me — JWT + DB session
+│   │   │           ├── auth.routes.js
+│   │   │           ├── auth.controller.js
+│   │   │           └── auth.service.js
 │   │   └── vitest.config.js
 │   │
 │   └── frontend/                     # Vite + React frontend
 │       ├── index.html
 │       ├── src/
 │       │   ├── main.jsx              # React root + providers
-│       │   ├── App.jsx
+│       │   ├── App.jsx               # BrowserRouter + Routes
 │       │   ├── index.css             # Tailwind directives + shadcn CSS vars
-│       │   ├── app/                  # App-wide setup (providers, router later)
-│       │   │   └── providers/        # ThemeProvider, QueryProvider
+│       │   ├── app/
+│       │   │   └── providers/        # ThemeProvider, QueryProvider, AuthProvider
 │       │   ├── pages/                # Route-level pages
-│       │   │   └── under-construction/
+│       │   │   ├── under-construction/
+│       │   │   ├── login/
+│       │   │   └── dashboard/
 │       │   ├── widgets/              # Composite UI blocks (empty for now)
-│       │   ├── features/             # User-facing features (empty for now)
+│       │   ├── features/
+│       │   │   └── auth/             # LoginForm, ProtectedRoute, api.js
 │       │   ├── entities/             # Business entities (empty for now)
 │       │   └── shared/               # Cross-cutting reusable code
-│       │       ├── ui/               # shadcn components live here
+│       │       ├── ui/               # shadcn components (button, input, label, theme-toggle)
 │       │       ├── lib/utils.js      # cn() helper
-│       │       ├── api/              # HTTP clients (empty for now)
+│       │       ├── api/http.js       # fetch wrapper + token storage
 │       │       ├── config/           # Constants (empty for now)
 │       │       └── hooks/            # Shared hooks (empty for now)
 │       ├── components.json           # shadcn CLI config (tsx: false → JSX output)
@@ -230,17 +246,21 @@ Each feature is a self-contained slice under `src/features/<name>/` with three f
 Shared concerns live outside `features/`:
 
 - `db/prisma.js` — the single `PrismaClient` instance.
-- `middleware/` — error handler, 404 handler, future auth middleware.
+- `lib/` — pure utilities reused across features (e.g. `jwt.js`, `password.js`).
+- `middleware/` — error handler, 404 handler, `requireAuth` / `requireRole`.
 - `config/env.js` — env reader.
 - `routes/index.js` — mounts each feature router under `/api`.
 
-Validation (Zod) and auth middleware will land here as the MVP grows.
+Controllers validate inputs with Zod (see `auth.controller.js`).
 
 ---
 
 ## Database & migrations
 
-The schema lives in `apps/api/prisma/schema.prisma`. Today it defines a placeholder `User` model with a `Role` enum (`USER` / `ADMIN`) — the MVP's foundational model.
+The schema lives in `apps/api/prisma/schema.prisma`. Current models:
+
+- **`User`** — id, email, passwordHash, role (`USER` | `ADMIN`), timestamps.
+- **`Session`** — server-side session row (id, userId, expiresAt). Issued on login, looked up by every authed request, deleted on logout.
 
 ### Workflow when you change the schema
 
@@ -257,6 +277,27 @@ That command:
 
 **Commit the generated migration folder** — it's part of the schema's history.
 
+### Seeding
+
+The seed lives at `apps/api/prisma/seed.js` and is wired into `prisma db seed` via the `prisma.seed` field in `apps/api/package.json`.
+
+It reads two env vars from `apps/api/.env`:
+
+| Env var          | Purpose                                |
+| ---------------- | -------------------------------------- |
+| `ADMIN_EMAIL`    | Email of the admin user to upsert.     |
+| `ADMIN_PASSWORD` | Plaintext password — bcrypt-hashed before insert. |
+
+Run it (idempotent — safe to re-run; it `upsert`s by email):
+
+```bash
+pnpm --filter @fishing-journal/api db:seed
+```
+
+After seeding, sign in at <http://localhost:5173/login>.
+
+To rotate the admin password locally: edit `ADMIN_PASSWORD` in `apps/api/.env`, re-run the seed, and any existing JWTs/sessions remain valid until `JWT_EXPIRES_IN` elapses (run a `prisma.session.deleteMany({ where: { userId } })` if you need to force re-login).
+
 ### Browsing data
 
 ```bash
@@ -272,6 +313,7 @@ pnpm db:down
 docker volume rm fishing-journal_postgres-data
 pnpm db:up
 pnpm --filter @fishing-journal/api prisma:migrate
+pnpm --filter @fishing-journal/api db:seed
 ```
 
 ---
@@ -304,6 +346,73 @@ Returns service liveness and database connectivity. Used by the frontend, contai
   "dbError": "Can't reach database server at `localhost:5432`"
 }
 ```
+
+### `POST /api/auth/login`
+
+Body: `{ "email": "...", "password": "..." }`. Returns a signed JWT and the public user shape on success.
+
+**200 OK**
+
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "user": { "id": "cuid", "email": "admin@example.com", "role": "ADMIN" }
+}
+```
+
+**400** invalid body • **401** invalid credentials.
+
+On success, the API also creates a `Session` row in Postgres. The JWT carries that session's ID — every authenticated request looks the session up and verifies it hasn't expired, so logout is real (not just "drop the token client-side").
+
+### `GET /api/auth/me`
+
+Requires `Authorization: Bearer <token>`. Returns the current user.
+
+**200 OK** → `{ "user": { "id": "...", "email": "...", "role": "..." } }`
+**401** missing/invalid/expired token.
+
+### `POST /api/auth/logout`
+
+Requires `Authorization: Bearer <token>`. Deletes the session row server-side; the JWT is then useless even if it hasn't expired.
+
+**200 OK** → `{ "ok": true }`
+
+---
+
+## Frontend routes & auth flow
+
+| Path          | Component                | Access        |
+| ------------- | ------------------------ | ------------- |
+| `/`           | `UnderConstructionPage`  | Public.       |
+| `/login`      | `LoginPage`              | Public.       |
+| `/dashboard`  | `DashboardPage`          | `ADMIN` only. |
+| `*`           | redirect → `/`           | —             |
+
+The provider tree (in `src/main.jsx`) is `ThemeProvider → QueryProvider → AuthProvider → App`.
+
+`AuthProvider` (`src/app/providers/AuthProvider.jsx`) holds `{ user, status, login, logout }`:
+
+- On mount, if a JWT exists in `localStorage`, it calls `GET /api/auth/me` to hydrate `user`. If that fails, it clears the token.
+- `login({ email, password })` calls `POST /api/auth/login`, stores the JWT, and sets `user`.
+- `logout()` calls `POST /api/auth/logout` (best-effort) and clears local state.
+- `status` is `'loading' | 'authenticated' | 'unauthenticated'`.
+
+`ProtectedRoute` (`src/features/auth/ProtectedRoute.jsx`) handles gating:
+
+```jsx
+<Route
+  path="/dashboard"
+  element={
+    <ProtectedRoute role="ADMIN">
+      <DashboardPage />
+    </ProtectedRoute>
+  }
+/>
+```
+
+It shows a loading state while `AuthProvider` hydrates, redirects to `/login` (preserving the intended `from` path) when unauthenticated, and redirects to `/` when the user lacks the required role.
+
+The HTTP client (`src/shared/api/http.js`) auto-attaches `Authorization: Bearer <token>` and throws a typed `ApiError` on non-2xx responses — wrap calls in `try/catch` (`LoginForm.jsx` shows the pattern).
 
 ---
 
@@ -346,3 +455,9 @@ Check both apps are running (`pnpm dev` runs both). The Vite proxy in `vite.conf
 
 **Stale Prisma client after schema change**
 Run `pnpm --filter @fishing-journal/api prisma:generate` (or just re-run the migrate command, which generates as part of its flow).
+
+**`EPERM: operation not permitted, rename ... query_engine-windows.dll.node` on Windows**
+Your API dev server is still running and holding the Prisma DLL. Stop the `pnpm dev` process (or just the api: `pnpm --filter @fishing-journal/api ...`), re-run `prisma:generate` / `prisma:migrate`, then start dev again.
+
+**`401 Invalid or expired token` after re-seeding or rebuilding the DB**
+Your browser still has a JWT in `localStorage` that references a `Session` row that no longer exists. Either sign out and back in, or `localStorage.removeItem('fishing-journal-auth-token')` in DevTools.
