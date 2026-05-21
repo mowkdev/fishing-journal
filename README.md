@@ -9,6 +9,8 @@ This repo is a Turborepo monorepo with two apps:
 
 Postgres runs in Docker; the API runs on the host for faster iteration.
 
+> **Learning this stack?** The [`docs/`](./docs) directory has a guided tour written for junior developers — start with [`docs/README.md`](./docs/README.md).
+
 ---
 
 ## Tech stack
@@ -203,6 +205,12 @@ fishing-journal/
 │       ├── vite.config.js
 │       ├── vitest.config.js
 │       └── jsconfig.json             # IDE path alias resolution for @/*
+│
+├── docs/                             # Junior-friendly guide to the stack
+│   ├── README.md                     # Index + reading order
+│   ├── architecture/                 # overview, FSD, API layers, auth
+│   ├── backend/                      # Express, Prisma, Postgres
+│   └── frontend/                     # React Hook Form, shadcn/ui, TanStack Query
 │
 ├── docker-compose.yml                # Postgres 16 + healthcheck + named volume
 ├── turbo.json                        # Turborepo pipeline
